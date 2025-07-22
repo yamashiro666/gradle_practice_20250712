@@ -7,10 +7,12 @@ import java.util.concurrent.*;
 
 public class MultiThreadedServer {
 
+	// 最大接続数
     private static final int THREADS_PER_POOL = 10;
+
+    // プロパティファイルのパス
     private static final String basepath = System.getProperty("user.dir");
-    private static final String CONFIG_FILE_PATH = basepath + "/src/main/java/gradle_practice_20250712/ports.properties";
-    private static final List<ExecutorService> threadPools = new ArrayList<>();
+    private static final String CONFIG_FILE_PATH = basepath + "/src/main/resources/ports.properties";
 
     public static void main(String[] args) {
         Properties props = new Properties();
@@ -33,7 +35,6 @@ public class MultiThreadedServer {
         for (int i = 0; i < ports.size(); i++) {
             int port = ports.get(i);
             ExecutorService pool = Executors.newFixedThreadPool(THREADS_PER_POOL);
-            threadPools.add(pool);
 
             final int index = i;
             new Thread(() -> {

@@ -7,6 +7,13 @@ public class Client {
     private static final String SERVER_ADDRESS = "localhost"; // または "127.0.0.1"
     private static final int SERVER_PORT = 5001;
 
+//    // プロパティファイルのパス
+//    private static final String basepath = System.getProperty("user.dir");
+//    private static final String CONFIG_FILE_PATH = basepath + "/src/main/java/gradle_practice_20250712/ports.properties";
+//
+//    // INPUTファイル
+//    FileInputStream fis = new FileInputStream(CONFIG_FILE_PATH);
+
     public static void main(String[] args) {
         try (
             Socket socket = new Socket(SERVER_ADDRESS, SERVER_PORT);
