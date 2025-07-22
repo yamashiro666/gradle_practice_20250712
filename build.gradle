@@ -9,6 +9,11 @@
 plugins {
     // Apply the java-library plugin to add support for Java Library
     id 'java-library'
+    id 'application'  // ←ここが重要
+}
+
+application {
+    mainClassName = 'gradle_practice_20250712.MultiThreadedServer'  // mainクラス
 }
 
 repositories {
