@@ -71,7 +71,7 @@ public class MultiThreadedServer {
                 PrintWriter out = new PrintWriter(socket.getOutputStream(), true)
             ) {
 
-//                out.println("接続しました。ポート: " + port + "（プール " + poolIndex + "）");
+                out.println("接続成功。 Serverポート: " + port + "（最大接続数: " + poolIndex + "）");
 
                 // コンソールに接続情報を表示する。
                 System.out.println("========================================");
@@ -87,6 +87,9 @@ public class MultiThreadedServer {
                     if ("exit".equalsIgnoreCase(line)) break;
                     out.println("Echo: " + line);
                     System.out.println("受信メッセージ: " + line);
+
+                    // クライアント側に終了メッセージを送る
+                    out.println("END");
                 }
 
             } catch (IOException e) {

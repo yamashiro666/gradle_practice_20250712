@@ -15,16 +15,22 @@ public class Client {
             BufferedReader stdIn = new BufferedReader(new InputStreamReader(System.in));
         ) {
 
-            System.out.println("サーバに接続しました。メッセージを入力してください（byeで終了）:");
+        	// welcomeメッセージを受信する
+            String welcomeMsg = in.readLine();
+            if (welcomeMsg != null) {
+                System.out.println("サーバに接続しました。: " + welcomeMsg);
+            }
+
+            System.out.println("メッセージを入力してください（byeで終了）:");
 
             String userInput;
             while ((userInput = stdIn.readLine()) != null) {
                 out.println(userInput); // サーバへ送信
 
-                String responseLine; // サーバから受信するメッセージを格納する用の変数
+                // サーバから複数行の応答を受け取る（nullまで or ENDまで）
+                String responseLine;
                 while ((responseLine = in.readLine()) != null) {
-
-                	// サーバからのメッセージを表示
+                    if ("END".equals(responseLine)) break; // ← 必要ならここで終了条件
                     System.out.println("サーバから: " + responseLine);
                 }
 
