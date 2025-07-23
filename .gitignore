@@ -1,7 +1,57 @@
-# Ignore Gradle project-specific cache directory
-.gradle
+# ====================
+# Java & Gradle Build
+# ====================
+/bin/
+/build/
+/out/
+/*.class
+/*.jar
+*.war
+*.ear
 
-# Ignore Gradle build output directory
-build
+# ====================
+# Gradle Wrapper
+# ====================
+!gradle/wrapper/gradle-wrapper.jar
 .gradle/
-build/
+/gradle-app.setting
+
+# ====================
+# IntelliJ IDEA
+# ====================
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# ====================
+# Eclipse
+# ====================
+.project
+.classpath
+.settings/
+
+# ====================
+# VS Code
+# ====================
+.vscode/
+
+# ====================
+# OS Generated
+# ====================
+.DS_Store
+Thumbs.db
+
+# ====================
+# Logs & Temp Files
+# ====================
+*.log
+*.tmp
+*.swp
+
+# ====================
+# Custom resources
+# ====================
+# 今後アップロードしたくないCSVファイルや設定ファイルがあるなら以下のように追記
+src/main/resources/client_file/
+!src/main/resources/client_file/README.md  # 空フォルダ維持用ダミー（必要なら）
