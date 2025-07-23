@@ -30,7 +30,7 @@ public class Client {
     		    .findFirst();
 
     	// パスが取得できない場合は、エラーを表示。
-    	if(mayBefilePath.isPresent()) {
+    	if(!mayBefilePath.isPresent()) {
     		System.out.println("該当ポートが見つかりません");
     	}
 
