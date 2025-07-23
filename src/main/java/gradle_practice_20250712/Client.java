@@ -38,7 +38,6 @@ public class Client {
             Socket socket = new Socket(addr, port);
             BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
             PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
-            BufferedReader stdIn = new BufferedReader(new InputStreamReader(System.in));
     		BufferedReader fileReader = new BufferedReader(new FileReader(mayBefilePath.get()))
         ) {
 

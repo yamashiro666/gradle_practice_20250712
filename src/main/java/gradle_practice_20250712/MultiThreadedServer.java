@@ -4,11 +4,15 @@ import java.io.*;
 import java.net.*;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class MultiThreadedServer {
 
 	// 最大接続数
     private static final int THREADS_PER_POOL = 10;
+
+    // ポートごとの接続数カウンタ（スレッドセーフ）
+    private static final Map<Integer, AtomicInteger> connectionCounters = new ConcurrentHashMap<>();
 
     public static void main(String[] args) {
 
@@ -19,14 +23,15 @@ public class MultiThreadedServer {
             return;
         }
 
-        // 各ポートに対してスレッドプールとサーバーソケットを作成
-        int index = 0;
+        // ポートごとに10個保持できるスレッドプールを作成する。
         for (Map.Entry<Integer, String> entry : portFileMap.entrySet()) {
             int port = entry.getKey();
             String fileName = entry.getValue();
 
+            // 接続数カウンタを初期化
+            connectionCounters.put(port, new AtomicInteger(0));
+
             ExecutorService pool = Executors.newFixedThreadPool(THREADS_PER_POOL);
-            final int poolIndex = index++;
 
             new Thread(() -> {
                 try (ServerSocket serverSocket = new ServerSocket(port)) {
@@ -34,7 +39,7 @@ public class MultiThreadedServer {
 
                     while (true) {
                         Socket clientSocket = serverSocket.accept();
-                        pool.execute(new ClientHandler(clientSocket, port, poolIndex));
+                        pool.execute(new ClientHandler(clientSocket, port));
                     }
                 } catch (IOException e) {
                     System.err.println("ポート " + port + " での待ち受けエラー: " + e.getMessage());
@@ -48,22 +53,23 @@ public class MultiThreadedServer {
     static class ClientHandler implements Runnable {
         private final Socket socket;
         private final int port;
-        private final int poolIndex;
 
-        public ClientHandler(Socket socket, int port, int poolIndex) {
+        public ClientHandler(Socket socket, int port) {
             this.socket = socket;
             this.port = port;
-            this.poolIndex = poolIndex;
         }
 
         @Override
         public void run() {
+
+        	int connectionCount = connectionCounters.get(port).incrementAndGet(); // 接続数をインクリメント
+
             try (
                 BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
                 PrintWriter out = new PrintWriter(socket.getOutputStream(), true)
             ) {
 
-                out.println("接続成功。 Serverポート: " + port + "（最大接続数: " + poolIndex + "）");
+                out.println("接続成功。 Serverポート: " + port + "（接続数: " + connectionCounters.get(port).get() + "）");
 
                 // コンソールに接続情報を表示する。
                 System.out.println("========================================");
@@ -71,22 +77,37 @@ public class MultiThreadedServer {
                 System.out.println("Clientアドレス: " + socket.getRemoteSocketAddress());
                 System.out.println("Clientポート番号: " + socket.getPort());
                 System.out.println("Serverポート番号: " + socket.getLocalPort());
+                System.out.println("現在の接続数: " + connectionCount);
                 System.out.println("========================================");
 
                 // 受信したメッセージを処理する
                 String line;
+                StringBuilder sb = new StringBuilder();
                 while ((line = in.readLine()) != null) {
                     if ("exit".equalsIgnoreCase(line)) break;
-                    out.println("Echo: " + line);
-                    System.out.println("受信メッセージ: " + line);
+
+                    sb.append(line);
+
+//                    out.println("Echo: " + line);
+//                    System.out.println("受信メッセージ: " + line);
 
                     // クライアント側に終了メッセージを送る
-                    out.println("END");
+//                    out.println("END");
                 }
+
+                System.out.println(sb.toString());
+
+                Thread.sleep(50000);
+
+                out.println("END");
 
             } catch (IOException e) {
                 System.err.println("クライアント処理エラー: " + e.getMessage());
-            } finally {
+            } catch (InterruptedException e) {
+				// TODO 自動生成された catch ブロック
+				e.printStackTrace();
+			} finally {
+            	connectionCounters.get(port).decrementAndGet(); // 切断後に接続数を戻す
                 try {
                     socket.close();
                 } catch (IOException ignore) {}
