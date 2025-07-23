@@ -1,11 +1,25 @@
 package gradle_practice_20250712;
 
-public class Test {
+import java.util.Map;
 
-	String basepath = System.getProperty("user.dir");
+public class Test {
 
 	@org.junit.jupiter.api.Test
 	public void test1() {
-		System.out.println(basepath + "/src/main/java/gradle_practice_20250712/ports.properties");
+
+    	// プロパティ情報を取得
+    	Map<Integer, String> map = ConfigLoader.loadPortFileMap();
+
+//    	// テスト出力
+//    	map.forEach((k,v) -> {
+//    		System.out.println("Key: " + k + " " + "Value: " + v);
+//    	});
+
+    	Client c = new Client("localhost", 5001);
+    	c.connect();
+
+
+
+
 	}
 }

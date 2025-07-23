@@ -2,21 +2,24 @@ package gradle_practice_20250712;
 
 import java.io.*;
 import java.net.*;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Properties;
 
 public class Client {
-    private static final String SERVER_ADDRESS = "localhost"; // または "127.0.0.1"
-    private static final int SERVER_PORT = 5001;
 
-//    // プロパティファイルのパス
-//    private static final String basepath = System.getProperty("user.dir");
-//    private static final String CONFIG_FILE_PATH = basepath + "/src/main/java/gradle_practice_20250712/ports.properties";
-//
-//    // INPUTファイル
-//    FileInputStream fis = new FileInputStream(CONFIG_FILE_PATH);
+    // アドレスとポート番号
+    private String addr;
+    private int port;
 
-    public static void main(String[] args) {
+    public Client(String addr, int port) {
+    	this.addr = addr;
+    	this.port = port;
+    }
+
+    public void connect() {
         try (
-            Socket socket = new Socket(SERVER_ADDRESS, SERVER_PORT);
+            Socket socket = new Socket(addr, port);
             BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
             PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
             BufferedReader stdIn = new BufferedReader(new InputStreamReader(System.in));
