@@ -15,7 +15,7 @@ public class Test {
 //    		System.out.println("Key: " + k + " " + "Value: " + v);
 //    	});
 
-    	Client c = new Client("localhost", 5001);
+    	Client c = new Client("localhost", 5001, map);
     	c.connect();
 
 

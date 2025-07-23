@@ -10,47 +10,7 @@ public class MultiThreadedServer {
 	// 最大接続数
     private static final int THREADS_PER_POOL = 10;
 
-//    // プロパティファイルのパス
-//    private static final String basepath = System.getProperty("user.dir");
-//    private static final String CONFIG_FILE_PATH = basepath + "/src/main/resources/port_mapping.properties";
-
     public static void main(String[] args) {
-//        Properties props = new Properties();
-//
-//        try (FileInputStream fis = new FileInputStream(CONFIG_FILE_PATH)) {
-//            props.load(fis);
-//        } catch (IOException e) {
-//            System.err.println("サーバーでエラーが発生しました: " + e.getMessage());
-//            System.out.println(e);
-//            return;
-//        }
-//
-//        // ポート番号を収集
-//        List<Integer> ports = new ArrayList<>();
-//        for (String key : props.stringPropertyNames()) {
-//            ports.add(Integer.parseInt(props.getProperty(key)));
-//        }
-//
-//        // 各ポートに対してスレッドプールとサーバーソケットを作成
-//        for (int i = 0; i < ports.size(); i++) {
-//            int port = ports.get(i);
-//            ExecutorService pool = Executors.newFixedThreadPool(THREADS_PER_POOL);
-//
-//            final int index = i;
-//            new Thread(() -> {
-//                try (ServerSocket serverSocket = new ServerSocket(port)) {
-//                    System.out.println("ポート " + port + " で待ち受け開始");
-//
-//                    while (true) {
-//                        Socket clientSocket = serverSocket.accept();
-//                        pool.execute(new ClientHandler(clientSocket, port, index));
-//                    }
-//
-//                } catch (IOException e) {
-//                    System.err.println("ポート " + port + " での待ち受け中にエラー: " + e.getMessage());
-//                }
-//            }).start();
-//        }
 
         // 設定ファイルからポートとファイル名のマッピングを取得
         Map<Integer, String> portFileMap = ConfigLoader.loadPortFileMap();
