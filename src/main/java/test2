@@ -1,0 +1,330 @@
+了解。SSL Bundlesは使わず、任意プレフィックスの.propertiesと、**LinuxのOS証明書ストア（CAバンドル／ディレクトリ）**から信頼CAを読み込んで RestTemplate に適用する実装例です。
+
+> 以下では例としてプレフィックスをclient.tlsにしています。あなたの固定プレフィックスに置き換えてご利用ください（＝@Valueのキー名を差し替え）。
+
+
+
+
+---
+
+application.properties（例：任意プレフィックスで設定）
+
+# ---- 固定プレフィックスに合わせて名称を変更してください（例：client.tls.*） ----
+client.tls.enabled=true
+
+# どちらか（or 両方）を指定：
+# 1) LinuxのCAバンドル（PEM連結ファイル）
+#   - Debian/Ubuntu: /etc/ssl/certs/ca-certificates.crt
+#   - RHEL/CentOS  : /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+#   - openSUSE     : /etc/ssl/ca-bundle.pem
+client.tls.ca-bundle=/etc/ssl/certs/ca-certificates.crt
+
+# 2) CAディレクトリ（ハッシュ済みリンクや *.crt PEMが並ぶ場所）
+client.tls.ca-dir=/etc/ssl/certs
+
+# 許可するTLSバージョン（任意。未設定なら 1.3/1.2 にフォールバック）
+client.tls.protocols=TLSv1.3,TLSv1.2
+
+# タイムアウト（任意）
+client.tls.connect-timeout-ms=5000
+client.tls.read-timeout-ms=30000
+
+> ポイント
+
+Javaは標準でOSストアをそのまま使いません。下記コードでOSのCAを読み込み→TrustManager化して適用します。
+
+ca-bundleが未指定ならよくある既定パスを自動探索、ca-dirがあれば併せて取り込みます。
+
+
+
+
+
+---
+
+実装（LinuxのOS CAから信頼ストアを作って RestTemplate に適用）
+
+// src/main/java/com/example/http/LinuxOsTrustHttpClientConfig.java
+package com.example.http;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.*;
+import java.security.KeyStore;
+import java.security.SecureRandom;
+import java.time.Duration;
+import java.util.*;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+import javax.net.ssl.*;
+
+import java.security.cert.Certificate;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
+
+import org.apache.hc.client5.http.config.RequestConfig;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
+import org.apache.hc.client5.http.impl.classic.HttpClients;
+import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManagerBuilder;
+import org.apache.hc.client5.http.io.HttpClientConnectionManager;
+import org.apache.hc.client5.http.ssl.ClientTlsStrategyBuilder;
+import org.apache.hc.client5.http.ssl.DefaultHostnameVerifier;
+import org.apache.hc.client5.http.ssl.TlsSocketStrategy;
+import org.apache.hc.core5.http.ssl.TLS;
+import org.apache.hc.core5.util.TimeValue;
+import org.apache.hc.core5.util.Timeout;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.http.client.HttpComponentsClientHttpRequestFactory;
+import org.springframework.web.client.RestTemplate;
+
+@Configuration
+public class LinuxOsTrustHttpClientConfig {
+
+  // ===== 任意プレフィックス（例：client.tls.*）======
+  @Value("${client.tls.enabled:true}")
+  private boolean tlsEnabled;
+
+  @Value("${client.tls.ca-bundle:}")     // 例: /etc/ssl/certs/ca-certificates.crt
+  private String caBundlePath;
+
+  @Value("${client.tls.ca-dir:}")        // 例: /etc/ssl/certs
+  private String caDirPath;
+
+  @Value("${client.tls.protocols:TLSv1.3,TLSv1.2}")
+  private String protocolsCsv;
+
+  @Value("${client.tls.connect-timeout-ms:5000}")
+  private int connectTimeoutMs;
+
+  @Value("${client.tls.read-timeout-ms:30000}")
+  private int readTimeoutMs;
+
+  @Bean
+  RestTemplate moodleRestTemplate(org.springframework.boot.web.client.RestTemplateBuilder builder) throws Exception {
+    // ----- TLSコンテキスト（Linux OS CAを信頼） -----
+    SSLContext sslContext = tlsEnabled ? buildSslContextFromLinuxOsStore() : SSLContext.getDefault();
+
+    // プロトコル決定
+    TLS[] tlsVersions = parseTlsVersions(protocolsCsv);
+
+    // HttpClient5 へ適用（ホスト名検証は有効）
+    TlsSocketStrategy tls = ClientTlsStrategyBuilder.create()
+        .setSslContext(sslContext)
+        .setTlsVersions(tlsVersions)
+        .setHostnameVerifier(new DefaultHostnameVerifier())
+        .build();
+
+    HttpClientConnectionManager cm = PoolingHttpClientConnectionManagerBuilder.create()
+        .setTlsSocketStrategy(tls)
+        .build();
+
+    RequestConfig rc = RequestConfig.custom()
+        .setConnectTimeout(Timeout.ofMilliseconds(connectTimeoutMs))
+        .setConnectionRequestTimeout(Timeout.ofMilliseconds(connectTimeoutMs))
+        .setResponseTimeout(Timeout.ofMilliseconds(readTimeoutMs))
+        .build();
+
+    CloseableHttpClient http = HttpClients.custom()
+        .setConnectionManager(cm)
+        .setDefaultRequestConfig(rc)
+        .evictExpiredConnections()
+        .evictIdleConnections(TimeValue.ofMinutes(1))
+        .build();
+
+    return builder
+        .requestFactory(() -> new HttpComponentsClientHttpRequestFactory(http))
+        .setConnectTimeout(Duration.ofMillis(connectTimeoutMs))
+        .setReadTimeout(Duration.ofMillis(readTimeoutMs))
+        .build();
+  }
+
+  private SSLContext buildSslContextFromLinuxOsStore() throws Exception {
+    KeyStore ks = loadLinuxSystemCAs(); // OSのCAをKeyStore化
+    TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+    tmf.init(ks);
+
+    SSLContext ctx = SSLContext.getInstance("TLS");
+    ctx.init(null, tmf.getTrustManagers(), new SecureRandom());
+    return ctx;
+  }
+
+  /**
+   * Linuxの代表的なCAバンドル/ディレクトリからCA証明書を読み込み、空のKeyStoreへ格納します。
+   * - ca-bundle が指定されていればそれを最優先で読む
+   * - 指定がなければ、よくある既定パスを順に探索
+   * - さらに ca-dir が指定されていれば *.crt/*.pem を追加で取り込む
+   */
+  private KeyStore loadLinuxSystemCAs() throws Exception {
+    KeyStore ks = KeyStore.getInstance(KeyStore.getDefaultType()); // 通常は PKCS12
+    ks.load(null, null);
+    int aliasSeq = 0;
+
+    // 1) CAバンドル（連結PEM）を読む
+    Optional<Path> bundle = resolveBundlePath();
+    if (bundle.isPresent()) {
+      Collection<? extends Certificate> certs = readAllCerts(bundle.get());
+      for (Certificate c : certs) {
+        ks.setCertificateEntry("os-bundle-" + (++aliasSeq), c);
+      }
+    }
+
+    // 2) ディレクトリから *.crt/*.pem を読む（任意）
+    Optional<Path> dir = resolveDirPath();
+    if (dir.isPresent()) {
+      List<Path> files = listCertFiles(dir.get());
+      for (Path f : files) {
+        try {
+          Collection<? extends Certificate> certs = readAllCerts(f);
+          for (Certificate c : certs) {
+            ks.setCertificateEntry("os-dir-" + (++aliasSeq), c);
+          }
+        } catch (Exception ignore) {
+          // 非証明書ファイル等は無視
+        }
+      }
+    }
+
+    if (aliasSeq == 0) {
+      throw new IllegalStateException("LinuxのCAバンドル/ディレクトリが見つからず、証明書を読み込めませんでした。プロパティで 'ca-bundle' か 'ca-dir' を指定してください。");
+    }
+    return ks;
+  }
+
+  private Optional<Path> resolveBundlePath() {
+    // 明示指定があればそれを使う
+    if (!caBundlePath.isBlank() && Files.isReadable(Path.of(caBundlePath))) {
+      return Optional.of(Path.of(caBundlePath));
+    }
+    // 代表的な既定ロケーションを順に探索
+    String[] candidates = {
+        "/etc/ssl/certs/ca-certificates.crt",                  // Debian/Ubuntu
+        "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",   // RHEL/CentOS
+        "/etc/ssl/ca-bundle.pem",                              // openSUSE/SLES
+        "/etc/pki/tls/certs/ca-bundle.crt"                     // 互換
+    };
+    for (String p : candidates) {
+      Path path = Path.of(p);
+      if (Files.isReadable(path)) return Optional.of(path);
+    }
+    return Optional.empty();
+  }
+
+  private Optional<Path> resolveDirPath() {
+    if (!caDirPath.isBlank() && Files.isDirectory(Path.of(caDirPath))) {
+      return Optional.of(Path.of(caDirPath));
+    }
+    // デフォルト候補
+    Path common = Path.of("/etc/ssl/certs");
+    return Files.isDirectory(common) ? Optional.of(common) : Optional.empty();
+  }
+
+  private static Collection<? extends Certificate> readAllCerts(Path pemOrDer) throws Exception {
+    try (InputStream in = Files.newInputStream(pemOrDer)) {
+      CertificateFactory cf = CertificateFactory.getInstance("X.509");
+      // generateCertificatesは、複数のPEMを含むストリームから一括で読み取れる
+      return cf.generateCertificates(in);
+    }
+  }
+
+  private static List<Path> listCertFiles(Path dir) throws IOException {
+    try (Stream<Path> s = Files.walk(dir, 1)) {
+      return s.filter(p -> Files.isRegularFile(p))
+              .filter(p -> {
+                String n = p.getFileName().toString().toLowerCase(Locale.ROOT);
+                return n.endsWith(".crt") || n.endsWith(".pem");
+              })
+              .collect(Collectors.toList());
+    }
+  }
+
+  private static TLS[] parseTlsVersions(String csv) {
+    List<TLS> list = new ArrayList<>();
+    for (String v : csv.split(",")) {
+      String t = v.trim();
+      if (t.equalsIgnoreCase("TLSv1.3")) list.add(TLS.V_1_3);
+      else if (t.equalsIgnoreCase("TLSv1.2")) list.add(TLS.V_1_2);
+      // 旧版は追加しない（安全側）
+    }
+    return list.isEmpty() ? new TLS[]{TLS.V_1_3, TLS.V_1_2} : list.toArray(new TLS[0]);
+  }
+}
+
+使い方
+
+あなたの固定プレフィックスに合わせて、application.properties と @Value("${…}") のキーを置き換えてください。
+
+公開CAだけで良い場合は、この構成自体が不要（JDKの既定trustでOK）ですが、OSストアに統一したい運用では本クラスを有効にします。
+
+サーバ側はフルチェーン配信とSAN/FQDN一致、TLS1.3/1.2のみを前提にしてください。
+
+
+
+了解です。ポイントだけ手短にまとめます。
+
+結論（Java 21 の前提）
+
+既定のキーストア種別：PKCS12（Java 9 以降のデフォルト）
+
+推奨：PKCS12 に統一（互換性・相互運用性に優れ、JKS はレガシー）
+
+“バージョン”の見え方
+
+keytool -list -v の出力にある Keystore type（例: PKCS12 / JKS）が実質的な“バージョン”識別子です。
+
+JKS には内部のformat version（多くは v2）が表示されることがありますが、Java 21 ではPKCS12 を使えばOKで、個別に“バージョン選択”を意識する必要はありません。
+
+
+
+使い分けの要点
+
+truststore（相手を“信頼”する側）：CA証明書（ルート＋必要なら中間）を入れる
+
+keystore（自分の“身元”を示す側）：自分の秘密鍵＋サーバ/クライアント証明書チェーンを入れる（mTLS 等）
+
+
+よく使うコマンド（参考）
+
+PKCS12 の truststore を作る（CA を取り込む）
+
+keytool -importcert -storetype PKCS12 \
+  -keystore truststore.p12 -storepass changeit \
+  -alias corp-root -file corp-rootCA.crt
+
+PEM 鍵＋証明書から PKCS12 keystore を作る（mTLS 用）
+
+# 秘密鍵 client.key と証明書 client.crt、チェーン chain.crt をまとめる
+openssl pkcs12 -export -inkey client.key -in client.crt \
+  -certfile chain.crt -out keystore.p12
+
+中身と種別の確認
+
+keytool -list -v -keystore truststore.p12 -storetype PKCS12
+
+
+（参考）標準の JVM プロパティで明示する場合
+
+> ※ Spring の独自機能を使わず、純 JSSE の挙動に委ねるときの指定。
+実運用ではコマンドラインの -D で渡すのが一般的です。
+
+
+
+javax.net.ssl.trustStore=/path/to/truststore.p12
+javax.net.ssl.trustStoreType=PKCS12
+javax.net.ssl.trustStorePassword=********
+
+# mTLS が必要な場合のみ
+javax.net.ssl.keyStore=/path/to/keystore.p12
+javax.net.ssl.keyStoreType=PKCS12
+javax.net.ssl.keyStorePassword=********
+
+まとめ
+
+Java 21 では PKCS12 がデフォ＆推奨。
+
+truststore には CA、keystore には鍵＋チェーン。
+
+“keystore バージョン”はPKCS12 を選べば十分で、JKS の format version を気にする必要は基本ありません。
+
+
+
