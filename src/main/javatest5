@@ -1,0 +1,193 @@
+了解。プロパティ（YAML）だけで切り替えられる、最小構成の Spring Boot HTTPS サーバです。
+JKS のキーストアを使い、**単方向認証（server-only）/ 双方向認証（mTLS）**をプロファイルで切り替えます。
+
+
+---
+
+1) プロジェクト構成（最小）
+
+https-server/
+├─ build.gradle
+├─ settings.gradle
+├─ src/main/java/com/example/https/HttpsServerApplication.java
+├─ src/main/resources/
+│  ├─ application.yml             # 共通
+│  ├─ application-oneway.yml      # 単方向用
+│  └─ application-mtls.yml        # 双方向用
+# （必要に応じて）以下を resources に置くと classpath: 参照で動きます
+#  ├─ server.jks                  # サーバ秘密鍵/証明書
+#  └─ trust.jks                   # クライアント検証用の信頼ストア（mTLS時）
+
+
+---
+
+2) build.gradle（Groovy）
+
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.3.2'
+    id 'io.spring.dependency-management' version '1.1.6'
+}
+
+group = 'com.example'
+version = '0.0.1-SNAPSHOT'
+
+java {
+    toolchain { languageVersion = JavaLanguageVersion.of(21) } // 17でもOK
+}
+
+repositories { mavenCentral() }
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+}
+
+tasks.named('test') { useJUnitPlatform() }
+
+> settings.gradle は最小で rootProject.name = "https-server" 程度でOK。
+
+
+
+
+---
+
+3) アプリ本体（最小1ファイル）
+
+package com.example.https;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@SpringBootApplication
+public class HttpsServerApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(HttpsServerApplication.class, args);
+    }
+}
+
+@RestController
+class HelloController {
+    @GetMapping("/hello")
+    public String hello() {
+        return "ok";
+    }
+}
+
+
+---
+
+4) プロパティ（YAML）
+
+共通（application.yml）
+
+server:
+  port: 8443
+  ssl:
+    enabled: true
+    # キーストアの場所と種類/パスワード
+    key-store: ${SSL_KEYSTORE:classpath:server.jks}         # 例: classpath:server.jks または file:/absolute/path/server.jks
+    key-store-password: ${SSL_KEYSTORE_PASSWORD:changeit}
+    key-store-type: ${SSL_KEYSTORE_TYPE:JKS}
+    key-alias: ${SSL_KEY_ALIAS:server}
+
+単方向認証（application-oneway.yml）
+
+server:
+  ssl:
+    client-auth: none   # サーバ認証のみ
+
+双方向認証（application-mtls.yml）
+
+server:
+  ssl:
+    client-auth: need   # クライアント証明書必須
+    trust-store: ${SSL_TRUSTSTORE:classpath:trust.jks}
+    trust-store-password: ${SSL_TRUSTSTORE_PASSWORD:changeit}
+    trust-store-type: ${SSL_TRUSTSTORE_TYPE:JKS}
+
+> 切替方法
+
+単方向: --spring.profiles.active=oneway
+
+双方向: --spring.profiles.active=mtls
+
+
+
+
+
+---
+
+5) キーストア/トラストストアの作成例（keytool）
+
+※ すべてパスワードは例として changeit を使用しています。
+
+(A) サーバ用 JKS（server.jks）を作る
+
+keytool -genkeypair -alias server -keyalg RSA -keysize 2048 \
+  -keystore server.jks -storepass changeit -keypass changeit \
+  -dname "CN=localhost, OU=Dev, O=Example, L=Tokyo, ST=Tokyo, C=JP"
+
+(B) mTLS 用のクライアント証明書（client.jks）とサーバ信頼ストア（trust.jks）
+
+# クライアント用の鍵/証明書
+keytool -genkeypair -alias client -keyalg RSA -keysize 2048 \
+  -keystore client.jks -storepass changeit -keypass changeit \
+  -dname "CN=test-client, OU=Dev, O=Example, L=Tokyo, ST=Tokyo, C=JP"
+
+# クライアント公開証明書を書き出し
+keytool -exportcert -alias client -keystore client.jks -storepass changeit \
+  -rfc -file client.crt
+
+# サーバ側の trust.jks に、上のクライアント証明書（または発行CA）を「信頼」として取り込む
+keytool -importcert -alias client -file client.crt \
+  -keystore trust.jks -storepass changeit -noprompt
+
+> 実運用では「クライアント証明書を直接 trust に入れる」より、クライアント証明書を発行したCA証明書（中間/ルート）を trust に入れるのが一般的です。
+
+
+
+
+---
+
+6) 起動とテスト
+
+ビルド
+
+./gradlew bootJar
+
+単方向（server-only）で起動
+
+java -jar build/libs/https-server-0.0.1-SNAPSHOT.jar --spring.profiles.active=oneway
+
+テスト（自己署名などの場合は -k で検証スキップ）
+
+curl -k https://localhost:8443/hello
+# => ok
+
+双方向（mTLS）で起動
+
+java -jar build/libs/https-server-0.0.1-SNAPSHOT.jar --spring.profiles.active=mtls
+
+mTLS のクライアント（例: curl を使う場合）
+
+client.jks を PKCS#12 に変換して使うのが簡単です：
+
+
+keytool -importkeystore \
+  -srckeystore client.jks -srcstoretype JKS -srcstorepass changeit \
+  -destkeystore client.p12 -deststoretype PKCS12 -deststorepass changeit
+
+アクセス（自己署名サーバ証明書なら -k を併用）
+
+
+curl --cert client.p12:changeit --cert-type P12 -k https://localhost:8443/hello
+# => ok（正しいクライアント証明書なら 200）
+
+
+---
+
+これで、コードは最小限・設定はプロパティファイル・JKS のキーストア使用・単方向/双方向の切替がすべて満たせます。
+必要なら、server.jks/trust.jks を src/main/resources/ に置けば classpath: 参照で完結しますし、外部ファイルで運用したい場合は file:/... に差し替えてください。
+
