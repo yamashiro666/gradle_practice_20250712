@@ -1,0 +1,70 @@
+了解。YAML を .properties に置き換えた版です（内容は前回と同じ切替ロジック）。
+
+構成（変更点のみ）
+
+src/main/resources/
+├─ application.properties          # 共通
+├─ application-oneway.properties   # 単方向 (server-only)
+└─ application-mtls.properties     # 双方向 (mTLS)
+# 例: resources に server.jks / trust.jks を置くなら classpath: で参照可能
+
+application.properties（共通）
+
+server.port=8443
+server.ssl.enabled=true
+
+# サーバ鍵（JKS）
+server.ssl.key-store=${SSL_KEYSTORE:classpath:server.jks}
+server.ssl.key-store-password=${SSL_KEYSTORE_PASSWORD:changeit}
+server.ssl.key-store-type=${SSL_KEYSTORE_TYPE:JKS}
+server.ssl.key-alias=${SSL_KEY_ALIAS:server}
+
+application-oneway.properties（単方向認証）
+
+# クライアント証明書は要求しない（サーバ証明書のみ）
+server.ssl.client-auth=none
+
+application-mtls.properties（双方向認証）
+
+# クライアント証明書を必須にする
+server.ssl.client-auth=need
+
+# クライアント証明書（またはその発行CA）を信頼する truststore
+server.ssl.trust-store=${SSL_TRUSTSTORE:classpath:trust.jks}
+server.ssl.trust-store-password=${SSL_TRUSTSTORE_PASSWORD:changeit}
+server.ssl.trust-store-type=${SSL_TRUSTSTORE_TYPE:JKS}
+
+起動方法
+
+単方向（server-only）
+
+
+java -jar build/libs/https-server-0.0.1-SNAPSHOT.jar \
+  --spring.profiles.active=oneway
+
+双方向（mTLS）
+
+
+java -jar build/libs/https-server-0.0.1-SNAPSHOT.jar \
+  --spring.profiles.active=mtls
+
+> 外部ファイルの JKS を使う場合は、環境変数で上書きできます：
+SSL_KEYSTORE=file:/abs/path/server.jks SSL_KEYSTORE_PASSWORD=...
+SSL_TRUSTSTORE=file:/abs/path/trust.jks SSL_TRUSTSTORE_PASSWORD=...
+
+
+
+動作確認の例
+
+単方向（自己署名なら検証スキップ）
+
+
+curl -k https://localhost:8443/hello
+
+双方向（例：client.jks → client.p12 へ変換済み）
+
+
+curl --cert client.p12:changeit --cert-type P12 -k https://localhost:8443/hello
+
+これで properties だけ で、JKS を使った HTTPS と 単方向／双方向の切替ができます。
+
