@@ -1,0 +1,453 @@
+https://chatgpt.com/share/68c9ed5f-dbc0-800f-a596-f76382ec0aa2
+
+
+common vfs を使ってftPSサーバに接続する実装をかいたのですが、相手サーバであるIISが(Windows Server 2022,IIS10)Tls1.3をサポートしていないかもしれないという話が出てきました。
+クライアント側のプログラムはFilesystemManager作って、#FtpFileSystemConfigBuilderを使ってオプションを生成、resolvefileでFileObjectを取得する感じです。TLSの設定は特にしてなかったと思います。
+
+以下のような方針でTLS1.2でちゃんと動くか確認したいのですが、以下で進めようと考えているのですが、どうでしょうか。評価してください。また、全く別の効率良い方法などあれば教えて下さい。
+　・IIS側のサーバを、Tls1.2で固定できるのなら固定する。そうすればクライアントもTLS1.2で通信してくれる?
+　・https://note.com/prog404/n/n00b045dc2014
+ここのページを参考にして、TLS1.2用のftps プロバイダやビルダーを新たに作成する。
+
+また、動作確認として、TLS1.2で通信できていることをどうやって確認すべきかわからない状態です。
+
+
+
+いい視点です。結論から言うと、まずは“サーバはTLS1.2固定＋クライアントは既存実装のまま（ただし必要ならJVMプロパティでTLS1.2を強制）”という最短コースで十分です。IIS の FTP(S) サービスは Windows Server 2022 上でもTLS 1.3 をサポートしていないという報告が複数あり、実際のところ 最大でも TLS 1.2 になります。したがって、Java 側が 1.3→1.2 に協調ネゴシエーションで落ちるのが通常挙動です。
+https://learn.microsoft.com/en-us/answers/questions/1321763/ftp-installed-as-part-of-iis-on-windows-server-202?utm_source=chatgpt.com
+
+以下、方針の評価とおすすめのやり方／確認方法です。
+
+
+---
+
+方針の評価
+
+「IIS側をTLS1.2固定にする」→◎
+IIS(FTPサービス) は OS の SChannel 設定に従います。TLS 1.0/1.1 を無効、1.2 を有効にしておけば、クライアントは自動的に TLS1.2 で握手します。IIS マネージャ単体のGUIには細かなTLSバージョン切替はなく、レジストリ（SChannel）や“(サードパーティ) IIS Crypto”ツールで行うのが一般的です。公式のレジストリ項目は MS ドキュメントがまとまっています。
+https://learn.microsoft.com/en-us/windows-server/security/tls/tls-registry-settings?utm_source=chatgpt.com&tabs=diffie-hellman
+
+「VFSにTLS1.2用プロバイダ/ビルダーを自作する」→基本は不要
+Commons VFS の FTPS は内部で Commons-Net の FTPSClient を使います。TLSバージョンを絞りたければ JVMプロパティ jdk.tls.client.protocols でプロセス全体を TLS1.2 にするのが手軽で安全です（System.setProperty でも可）。自前プロバイダは保守コストが上がるので、他に強い理由がなければ避けたいです。
+https://commons.apache.org/proper/commons-vfs/commons-vfs2/apidocs/org/apache/commons/vfs2/provider/ftps/FtpsFileProvider.html?utm_source=chatgpt.com
+
+
+---
+
+クライアント（Commons VFS）の実装ポイント
+
+1. FTPS用ビルダーを使う
+FtpFileSystemConfigBuilder ではなく FtpsFileSystemConfigBuilder を使ってください（明示／暗黙モード、PROTレベル等を設定可能）。たとえば Explicit FTPS + PROT P（データチャネル暗号化）なら：
+
+
+
+FileSystemOptions opts = new FileSystemOptions();
+var ftpsb = org.apache.commons.vfs2.provider.ftps.FtpsFileSystemConfigBuilder.getInstance();
+
+ftpsb.setFtpsMode(opts, org.apache.commons.vfs2.provider.ftps.FtpsMode.EXPLICIT);
+ftpsb.setDataChannelProtectionLevel(opts,
+    org.apache.commons.vfs2.provider.ftps.FtpsDataChannelProtectionLevel.PRIVATE);
+
+// パッシブ推奨
+org.apache.commons.vfs2.provider.ftp.FtpFileSystemConfigBuilder.getInstance()
+    .setPassiveMode(opts, true);
+
+// 例: 接続
+FileSystemManager fs = VFS.getManager();
+FileObject fo = fs.resolveFile("ftps://user:pass@host:21/dir/", opts);
+
+FtpsFileSystemConfigBuilder は FTPS 専用の設定を提供します。
+
+2. TLS1.2を“確実に”使いたい場合の最小手段
+アプリ起動引数またはコードで jdk.tls.client.protocols=TLSv1.2 を指定します：
+
+
+
+起動引数例（Gradle実行時）
+./gradlew run -Djdk.tls.client.protocols=TLSv1.2
+
+Java 内で（VFS初期化前に）
+System.setProperty("jdk.tls.client.protocols", "TLSv1.2");
+
+
+これは JSSE 公式のシステムプロパティで、クライアントの有効TLSを限定できます。
+
+> 備考：VFSから直接 FTPSClient#setEnabledProtocols(...) を叩くAPIは露出していません。どうしてもコードで絞りたい場合は FTPS のプロバイダを拡張して FTPSClient 生成時に setEnabledProtocols(new String[]{"TLSv1.2"}) を呼ぶ方法もありますが、前述のプロパティで十分です。FTPSClient 自体はプロトコル/スイートの get/set を持っています。
+
+
+
+3. 既知のFTPS特有の落とし穴
+一部サーバ（vsftpd 等）はデータ接続で TLS セッション再利用を要求します。うまく LIST/RETR できず 425/handshake になる場合はこの可能性があります。Commons-Net には対応/回避の経緯があり、バージョンによって挙動が異なりました（setEnabledSessionCreation(false) を絡める話題が有名）。IIS では問題になりにくいですが、現象が出たらライブラリアップデートや設定見直しを。
+
+
+
+
+---
+
+TLS1.2で通信できていることの確認方法（おすすめ順）
+
+A. JavaのJSSEデバッグで確認（最も確実・手軽）
+起動時に以下を付与します：
+
+-Djavax.net.debug=ssl:handshake
+
+ログに ServerHello/Negotiated protocol が TLSv1.2 と出ます。これは FTPSClient 公式Javadocでも推奨されている確認手段です。
+
+B. OpenSSLで対向サーバを叩いて確認（外形チェック）
+
+Explicit FTPS（21番）
+
+openssl s_client -starttls ftp -connect <host>:21 -tls1_2 -servername <host>
+
+Implicit FTPS（990番）
+
+openssl s_client -connect <host>:990 -tls1_2 -servername <host>
+
+
+出力の Protocol  : TLSv1.2 を確認。
+
+C.（お好み）Wireshark/tcpdump でTLSハンドシェイクを読む
+Server Hello の negotiated version が 1.2 であることを確認。
+
+
+---
+
+サーバ側（IIS）でTLS1.2固定にするには
+
+**レジストリ（SChannel）**で TLS1.0/1.1 を無効、1.2 を有効にします（HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols）。公式レジストリ設定は MS ドキュメント参照。グループポリシーでの無効化手順もあります。
+
+なお IISのFTPサービスはTLS1.3をサポートしないという情報があり、実運用でも 1.2 が上限になるケースが一般的です。
+
+
+
+---
+
+まとめ（最短手順）
+
+1. IIS で TLS1.2 を有効・1.0/1.1 を無効（SChannel 設定）。
+
+
+2. クライアントは VFS の FTPS を使用し、FtpsFileSystemConfigBuilder で Explicit + PROT P + Passive をセット。
+
+
+3. 念のため JVM に -Djdk.tls.client.protocols=TLSv1.2 を付けて実行。
+
+
+4. -Djavax.net.debug=ssl:handshake でログに TLSv1.2 が出ることを確認。
+
+
+
+> これで十分に「TLS1.2でちゃんと動くか」を検証できます。
+もし 425 や データ接続のハンドシェイク失敗が出た場合のみ、セッション再利用要件を疑い、Commons-Net のバージョン・設定を見直してください。
+
+
+
+必要なら、あなたの今の VFS コード断片（resolveFile 部分）に合わせて 最小差分パッチも書きます。
+
+
+
+-Djavax.net.debug=ssl:handshake
+これはeclipseのJunitで実行する場合、実行構成の引数に入れる感じでしょうか。
+また、ログはどこに出ますか。コンソールに出ますか
+
+
+
+はい、そのとおりです。Eclipse の JUnit 実行なら Run Configurations の “VM arguments” に入れます。出力は 標準エラー（stderr） なので、Eclipse の Console ビューに（通常は赤い文字で）出ます。
+
+手順（Eclipse・JUnit 実行）
+
+1. メニュー Run > Run Configurations… を開く
+
+
+2. 左のツリーで JUnit を選び、対象テストの構成を開く（なければ New）
+
+
+3. Arguments タブ → VM arguments に以下を追加
+
+-Djavax.net.debug=ssl:handshake
+
+（必要なら TLS1.2 を強制する場合は併せて
+-Djdk.tls.client.protocols=TLSv1.2 も。）
+
+
+4. Apply > Run
+
+
+5. Console ビューにハンドシェイクのログが大量に出ます（stderr）。
+
+例：ClientHello / ServerHello、Cipher Suite、protocol TLSv1.2 などの行が見えます。
+
+TLS1.2 になっている確認ポイント：
+「ServerHello」「Negotiated protocol: TLSv1.2」「protocol TLSv1.2」等の表記を探す。
+
+
+
+
+役立つ小ワザ
+
+出力が長くて切れる場合：
+Preferences > Run/Debug > Console の「Limit console output」をオフ、またはサイズを拡張。
+
+証明書の信頼判断も見たい：
+-Djavax.net.debug=ssl:handshake,trustmanager を使うと、どの証明書をどう評価したかが出ます。
+さらに深掘りするなら -Djava.security.debug=certpath（証明書パス構築の詳細）。
+
+ログをファイルに落としたい：
+Run Config の Common タブ → Standard Input and Output → Output file にチェックして保存先を指定（Append 推奨）。
+
+
+参考：Gradle で走らせる場合
+
+一発実行：
+
+./gradlew test -Djavax.net.debug=ssl:handshake
+
+（ログはターミナル、ファイル保存は > out.log 2>&1）
+
+build.gradle に恒久設定：
+
+test {
+  jvmArgs '-Djavax.net.debug=ssl:handshake'
+}
+
+
+
+---
+
+これで Eclipse のコンソールに TLS ハンドシェイクが出るので、TLSv1.2 になっているか即確認できます。必要なら、今のテスト構成に入れて動かしてみてください。
+
+
+
+
+一応、プロバイダやビルダーを実装する方法もかくことはできますか。
+
+
+できます！Commons VFS は “プロバイダ（FileProvider）→ ファイルシステム（FileSystem）→ クライアントラッパー（FTPClientWrapper）” の層でできているので、TLS 1.2 を強制する FTPS 用の独自プロバイダを作れば OK です。ポイントは、VFS の標準 FtpsClientFactory / FtpsFileSystemConfigBuilder には「有効化する TLS プロトコルの指定」が無いので（モード/PROT/TrustManager/KeyManagerはある）自前で FTPSClient#setEnabledProtocols(...) を呼べる場所を作ることです。
+
+
+---
+
+最小実装（プロバイダ + ラッパー）
+
+1) TLS1.2 を有効化するラッパー
+
+FTPClientWrapper を継承し、接続前に FTPSClient へ TLSv1.2 を設定します。
+
+package com.example.vfs.ftps;
+
+import org.apache.commons.net.ftp.FTPSClient;
+import org.apache.commons.net.ftp.FTPReply;
+import org.apache.commons.vfs2.*;
+import org.apache.commons.vfs2.provider.GenericFileName;
+import org.apache.commons.vfs2.provider.ftp.FTPClientWrapper;
+import org.apache.commons.vfs2.provider.ftp.FtpFileSystemConfigBuilder;
+import org.apache.commons.vfs2.provider.ftps.FtpsFileSystemConfigBuilder;
+import org.apache.commons.vfs2.provider.ftps.FtpsMode;
+import org.apache.commons.vfs2.provider.ftps.FtpsDataChannelProtectionLevel;
+import org.apache.commons.vfs2.util.UserAuthenticatorUtils;
+
+import javax.net.ssl.KeyManager;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLException;
+import javax.net.ssl.TrustManager;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+
+public final class Tls12FtpsClientWrapper extends FTPClientWrapper {
+  public Tls12FtpsClientWrapper(GenericFileName root, FileSystemOptions opts) throws FileSystemException {
+    super(root, opts);
+  }
+
+  @Override
+  protected org.apache.commons.net.ftp.FTPClient createClient(GenericFileName root, UserAuthenticationData auth)
+      throws FileSystemException {
+
+    final FileSystemOptions opts = getFileSystemOptions();
+    final FtpsFileSystemConfigBuilder ftps = FtpsFileSystemConfigBuilder.getInstance();
+    final FtpFileSystemConfigBuilder ftp = FtpFileSystemConfigBuilder.getInstance();
+
+    final boolean implicit = ftps.getFtpsMode(opts) == FtpsMode.IMPLICIT;
+
+    // 任意: 明示的に TLSv1.2 の SSLContext を使う
+    SSLContext ctx;
+    try {
+      ctx = SSLContext.getInstance("TLSv1.2");
+      ctx.init(null, null, null);
+    } catch (Exception e) {
+      throw new FileSystemException("vfs.provider.ftps/ssl-context.error", e, root);
+    }
+
+    final FTPSClient client = new FTPSClient(implicit, ctx);
+    client.setEnabledProtocols(new String[]{"TLSv1.2"}); // ★ ここで TLS1.2 を強制
+    client.setControlEncoding(StandardCharsets.UTF_8.name());
+
+    // Trust/Key マネージャ（必要なら）
+    TrustManager tm = ftps.getTrustManager(opts);
+    if (tm != null) client.setTrustManager(tm);
+    KeyManager km = ftps.getKeyManager(opts);
+    if (km != null) client.setKeyManager(km);
+
+    // タイムアウト等（必要に応じて）
+    Integer connectTimeout = ftp.getConnectTimeout(opts);
+    if (connectTimeout != null) client.setConnectTimeout(connectTimeout);
+    Integer soTimeout = ftp.getSoTimeout(opts);
+    if (soTimeout != null) client.setSoTimeout(soTimeout);
+
+    // --- 接続 & AUTH/LOGIN ---
+    final String host = root.getHostName();
+    final int port = root.getPort();
+    final char[] user = UserAuthenticatorUtils.getData(
+        auth, UserAuthenticationData.USERNAME, UserAuthenticatorUtils.toChar(root.getUserName()));
+    final char[] pass = UserAuthenticatorUtils.getData(
+        auth, UserAuthenticationData.PASSWORD, UserAuthenticatorUtils.toChar(root.getPassword()));
+
+    try {
+      client.connect(host, port);
+      if (!FTPReply.isPositiveCompletion(client.getReplyCode())) {
+        throw new FileSystemException("vfs.provider.ftp/connect-rejected.error", host);
+      }
+      if (!client.login(UserAuthenticatorUtils.toString(user), UserAuthenticatorUtils.toString(pass))) {
+        throw new FileSystemException("vfs.provider.ftp/login.error", host, UserAuthenticatorUtils.toString(user));
+      }
+
+      // Data チャネル保護（PROT）指定があれば適用
+      FtpsDataChannelProtectionLevel prot = ftps.getDataChannelProtectionLevel(opts);
+      if (prot != null) {
+        try {
+          client.execPBSZ(0);
+          client.execPROT(prot.name());
+        } catch (SSLException e) {
+          throw new FileSystemException("vfs.provider.ftps/data-channel.level", e, prot.toString());
+        }
+      }
+
+      // パッシブ等（必要に応じて）
+      if (Boolean.TRUE.equals(ftp.getPassiveMode(opts))) client.enterLocalPassiveMode();
+
+      // 初期ディレクトリ遷移（必要なら）
+      String wd = root.getPath();
+      if (wd != null && !wd.isEmpty()) client.changeWorkingDirectory(wd);
+
+      return client;
+
+    } catch (IOException ioe) {
+      try { if (client.isConnected()) client.disconnect(); } catch (IOException ignore) {}
+      throw new FileSystemException("vfs.provider.ftp/connect.error", ioe, root);
+    } finally {
+      UserAuthenticatorUtils.cleanup(auth);
+    }
+  }
+}
+
+> なぜこの形？
+標準の FtpsClientFactory は FTPSClient を生成し、Trust/KeyManager と PROT 設定は行いますが、プロトコル（TLS1.2/1.3 等）の指定はしません。そのため、接続前に setEnabledProtocols できる自前生成ポイントが必要です。 また、FTPSClient には setEnabledProtocols が用意されているため、ここで TLS1.2 を確実に強制できます。
+さらに、FTPClientWrapper は createClient(...) を protected で提供しており、ここをオーバーライドするのが一番シンプルです。
+
+
+
+2) プロバイダ（scheme を増やす）
+
+VFS に新しいスキーム（例: ftps12）として登録します。
+
+package com.example.vfs.ftps;
+
+import org.apache.commons.vfs2.*;
+import org.apache.commons.vfs2.provider.FileProvider;
+import org.apache.commons.vfs2.provider.ftp.FtpClient;
+import org.apache.commons.vfs2.provider.ftps.FtpsFileProvider;
+import org.apache.commons.vfs2.provider.ftps.FtpsFileSystem;
+import org.apache.commons.vfs2.provider.GenericFileName;
+
+public final class Tls12FtpsFileProvider extends FtpsFileProvider implements FileProvider {
+  @Override
+  protected FileSystem doCreateFileSystem(FileName root, FileSystemOptions opts) throws FileSystemException {
+    GenericFileName name = (GenericFileName) root;
+    FtpClient client = new Tls12FtpsClientWrapper(name, opts);
+    return new FtpsFileSystem(name, client, opts);
+  }
+}
+
+FtpsFileSystem は FTP 系の共通実装を継承しており、ラッパーを差し替えれば使えます。
+
+3) 使い方（登録 & 接続）
+
+import org.apache.commons.vfs2.*;
+import org.apache.commons.vfs2.impl.DefaultFileSystemManager;
+
+DefaultFileSystemManager mgr = new DefaultFileSystemManager();
+mgr.addProvider("ftps12", new com.example.vfs.ftps.Tls12FtpsFileProvider()); // 新スキーム
+mgr.init();
+
+FileSystemOptions opts = new FileSystemOptions();
+org.apache.commons.vfs2.provider.ftps.FtpsFileSystemConfigBuilder.getInstance()
+    .setFtpsMode(opts, org.apache.commons.vfs2.provider.ftps.FtpsMode.EXPLICIT);
+// 必要なら PROT を指定（一般的には PROT P）
+org.apache.commons.vfs2.provider.ftps.FtpsFileSystemConfigBuilder.getInstance()
+    .setDataChannelProtectionLevel(opts, org.apache.commons.vfs2.provider.ftps.FtpsDataChannelProtectionLevel.P);
+
+FileObject fo = mgr.resolveFile("ftps12://user:pass@hostname:21/path/to/dir", opts);
+
+（StandardFileSystemManager では XML による自動登録も可能。META-INF/vfs-providers.xml でスキームとクラスを追加するのが王道です。参考: プロバイダ実装の流れと vfs-providers.xml 登録の解説）
+
+
+---
+
+任意：ビルダーで TLS 設定を外出し（オプション）
+
+「TLS プロトコル/暗号」をオプション化したければ、FtpsFileSystemConfigBuilder を継承した独自ビルダーを作り、カンマ区切り文字列で設定→ラッパー側で取得して setEnabledProtocols/setEnabledCipherSuites に渡します。
+
+public final class TlsFtpsFileSystemConfigBuilder extends org.apache.commons.vfs2.provider.ftps.FtpsFileSystemConfigBuilder {
+  private static final TlsFtpsFileSystemConfigBuilder I = new TlsFtpsFileSystemConfigBuilder();
+  private static final String KEY_PROTOCOLS = TlsFtpsFileSystemConfigBuilder.class.getName()+".protocolsCsv";
+  private static final String KEY_CIPHERS   = TlsFtpsFileSystemConfigBuilder.class.getName()+".ciphersCsv";
+
+  public static TlsFtpsFileSystemConfigBuilder getInstance() { return I; }
+
+  @Override protected Class<? extends FileSystem> getConfigClass() { return org.apache.commons.vfs2.provider.ftps.FtpsFileSystem.class; }
+
+  public void setEnabledProtocolsCsv(FileSystemOptions o, String csv) { setParam(o, KEY_PROTOCOLS, csv); }
+  public String getEnabledProtocolsCsv(FileSystemOptions o) { return getString(o, KEY_PROTOCOLS); }
+
+  public void setEnabledCiphersCsv(FileSystemOptions o, String csv) { setParam(o, KEY_CIPHERS, csv); }
+  public String getEnabledCiphersCsv(FileSystemOptions o) { return getString(o, KEY_CIPHERS); }
+}
+
+> これを使う場合、Tls12FtpsClientWrapper 側で getEnabledProtocolsCsv を読んで client.setEnabledProtocols(csv.split(",")) します。
+標準ビルダーは TLS プロトコルの項目を持たないので（モード/PROT/信頼&鍵マネージャはある）、拡張の価値があります。
+
+
+
+
+---
+
+もっと手軽な代替案（コード改修なし）
+
+JVM 全体で TLS 1.2 を強制
+-Djdk.tls.client.protocols=TLSv1.2（必要なら -Dhttps.protocols=TLSv1.2 も）をテスト実行の VM 引数に指定。
+Commons Net の FTPS も JSSE を使うので、これで TLS1.2 に寄せられます。
+
+FTPSClient コンストラクタに SSLContext(TLSv1.2) を渡す
+上記コードのように new FTPSClient(false, ctx) を使うだけでも効果があります。FTPSClient は明示的にプロトコル/暗号を絞るメソッドを持っています。
+
+
+
+---
+
+補足（内部の流れの根拠）
+
+VFS の FtpsClientFactory は FTPSClient を生成して Trust/KeyManager や PROT を設定しますが、TLS プロトコルは触りません。
+
+FTPClientWrapper には protected FTPClient createClient(...) があり、ここをオーバーライドすれば接続前に setEnabledProtocols を適用できます。
+
+FtpsFileSystem は FtpClient（= 上記ラッパー）を受け取って組み立てます。
+
+FTPSClient 自体は setEnabledProtocols/setEnabledCipherSuites を提供しています。
+
+
+
+---
+
+必要なら、この最小実装を ftps12:// ではなく既存の ftps:// に差し替える（＝そのスキームで上書き登録）こともできますが、テスト容易性のためまずは別スキームでの併存をおすすめします。
+
+「ここまで実装したものをプロジェクトに入れて、あなたの現在の呼び出し（resolveFile まわり）に合わせて薄くラップしたい」などあれば、プロジェクト構成に合わせた最小差分版も用意します。
+
