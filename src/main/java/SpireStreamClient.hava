@@ -1,0 +1,87 @@
+import java.net.http.*; 
+import java.net.URI;
+import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.time.*;
+import java.util.concurrent.*;
+import com.fasterxml.jackson.databind.*;
+
+public class SpireStreamClient {
+  private final HttpClient client = HttpClient.newBuilder()
+      .connectTimeout(Duration.ofSeconds(10))
+      .build();
+
+  private final ScheduledExecutorService watchdog = Executors.newSingleThreadScheduledExecutor();
+  private final ObjectMapper mapper = new ObjectMapper();
+
+  private volatile String lastPositionToken = null;
+  private volatile long lastByteNanos = System.nanoTime();
+  private final Duration idleThreshold = Duration.ofSeconds(90); // 無通信で再接続
+
+  private final String token; // Bearer
+  public SpireStreamClient(String token) { this.token = token; }
+
+  public void start() { connect(/*pos*/ null); startWatchdog(); }
+
+  private void startWatchdog() {
+    watchdog.scheduleAtFixedRate(() -> {
+      if (Duration.ofNanos(System.nanoTime() - lastByteNanos).compareTo(idleThreshold) > 0) {
+        System.err.println("[watchdog] idle too long -> reconnect");
+        reconnect();
+      }
+    }, 30, 30, TimeUnit.SECONDS);
+  }
+
+  private synchronized void reconnect() {
+    connect(lastPositionToken); // 途中から再開
+  }
+
+  private synchronized void connect(String posToken) {
+    String base = "https://api.airsafe.spire.com/v2/targets/stream?compression=none";
+    String uri = (posToken == null) ? base : base + "&position_token=" + URLEncoder.encode(posToken, StandardCharsets.UTF_8);
+    HttpRequest req = HttpRequest.newBuilder(URI.create(uri))
+        .header("Authorization", "Bearer " + token)
+        .GET()
+        .build();
+
+    client.sendAsync(req, HttpResponse.BodyHandlers.ofInputStream())
+      .whenComplete((resp, err) -> {
+        if (err != null) { backoffReconnect(); return; }
+        if (resp.statusCode() != 200) { backoffReconnect(); return; }
+        readLoop(resp.body()); // ここで永続的に読み続ける
+      });
+  }
+
+  private void readLoop(InputStream in) {
+    try (var br = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
+      for (String line; (line = br.readLine()) != null; ) {
+        lastByteNanos = System.nanoTime();
+        if (line.isBlank()) continue;
+        var node = mapper.readTree(line);
+        if (node.has("position_token")) {
+          lastPositionToken = node.get("position_token").asText(); // 6時間以内有効
+        } else if (node.has("status")) {
+          System.out.println("[status] " + node.get("status").toString());
+        } else if (node.has("target")) {
+          handleTarget(node.get("target"));
+        } else {
+          System.out.println("[unknown] " + line);
+        }
+      }
+    } catch (IOException e) {
+      // サーバが閉じる・ネットワーク断など → 再接続
+    } finally {
+      backoffReconnect();
+    }
+  }
+
+  private void handleTarget(com.fasterxml.jackson.databind.JsonNode target) {
+    // TODO: 業務処理
+  }
+
+  private void backoffReconnect() {
+    // 単純バックオフ例
+    Executors.newSingleThreadScheduledExecutor()
+      .schedule(this::reconnect, 3, TimeUnit.SECONDS);
+  }
+}
